@@ -255,7 +255,6 @@ for raw in "${TARGETS[@]}"; do
 
         while IFS= read -r -d '' file; do
             [[ -f "$file" ]] || continue
-            file=$(readlink -f -- "$file" 2>/dev/null || printf "%s" "$file")
             if [[ -z "${seen[$file]}" ]]; then
                 seen[$file]=1
                 FILES+=("$file")
