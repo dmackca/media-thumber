@@ -4,26 +4,58 @@
 # Takes a directory or file as argument and generates thumbnails for all video files
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 [--verbose] <directory|file>"
+    echo "Usage: $0 [--verbose] <directory|file> [<directory|file> ...]"
     exit 1
 fi
 
-# Parse flags
+# Parse flags and collect targets
 VERBOSE=0
-if [[ "$1" == "--verbose" ]]; then
-    VERBOSE=1
-    shift
-fi
-
-target="$1"
+TARGETS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                TARGETS+=("$1")
+                shift
+            done
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            TARGETS+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # Resolve to absolute path if possible
-if [[ -e "$target" ]]; then
-    # readlink -f will resolve symlinks and produce an absolute path
-    target=$(readlink -f -- "$target" 2>/dev/null || printf "%s" "$target")
-elif [[ "$target" != /* ]]; then
-    # If it doesn't exist yet but is a relative path, make it absolute relative to PWD
-    target="$PWD/$target"
+resolve_path() {
+    local p="$1"
+    # Expand leading ~ to $HOME
+    if [[ "$p" == ~* ]]; then
+        p="${p/#~/$HOME}"
+    fi
+
+    if [[ -e "$p" ]]; then
+        readlink -f -- "$p" 2>/dev/null || printf "%s" "$p"
+    elif [[ "$p" != /* ]]; then
+        printf "%s" "$PWD/$p"
+    else
+        printf "%s" "$p"
+    fi
+}
+
+# Ensure we have at least one target
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+    echo "Usage: $0 [--verbose] <directory|file> [<directory|file> ...]"
+    exit 1
 fi
 
 # Safer pipeline behavior
@@ -46,6 +78,23 @@ check_deps() {
 }
 
 check_deps
+
+# Video extensions whitelist (lowercase)
+VIDEO_EXTENSIONS=("mkv" "mp4" "mov" "avi" "flv" "wmv" "webm" "m4v" "mpg" "mpeg" "3gp")
+
+# Return 0 if the given file's extension is in the whitelist, else non-zero
+is_video_file() {
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    local ext="${f##*.}"
+    ext="${ext,,}"
+    for e in "${VIDEO_EXTENSIONS[@]}"; do
+        if [[ "$ext" == "$e" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Colors and emojis for nicer output (only when stdout is a TTY)
 if [[ -t 1 ]]; then
@@ -92,6 +141,11 @@ generate_thumbnail() {
         return
     fi
 
+    # Verbose info about what will be processed
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo "Processing: $video_file"
+        echo "Will write thumbnail: $thumbnail"
+    fi
     # Print a single-line progress indicator (will append Done/Failed)
     printf "%bGenerating %s...%b" "$BLUE$BOLD" "$(basename "$thumbnail")" "$RESET"
 
@@ -116,9 +170,25 @@ generate_thumbnail() {
     local errfile
     errfile=$(mktemp) || errfile="/tmp/thumber_err.$$"
     if ffmpeg -ss "$random_time" -i "$video_file" -vframes 1 "$thumbnail" > /dev/null 2> "$errfile"; then
-        ((CREATED++))
-        printf "%b %bDone%b\n" "$EMOJI_OK" "$GREEN$BOLD" "$RESET"
-        rm -f "$errfile"
+        # Confirm the thumbnail file actually exists
+        if [[ -f "$thumbnail" ]]; then
+            ((CREATED++))
+            printf "%b %bDone%b\n" "$EMOJI_OK" "$GREEN$BOLD" "$RESET"
+            if [[ $VERBOSE -eq 1 ]]; then
+                echo "Created: $thumbnail"
+            fi
+            rm -f "$errfile"
+        else
+            ((FAILED++))
+            printf "%b %bFailed (no output file)%b\n" "$EMOJI_FAIL" "$RED$BOLD" "$RESET" >&2
+            echo "ffmpeg reported success but thumbnail not found: $thumbnail" >&2
+            if [[ -s "$errfile" ]]; then
+                echo "ffmpeg messages:" >&2
+                cat "$errfile" >&2
+            fi
+            rm -f "$errfile"
+            echo "Error: Failed to generate thumbnail for $video_file" >&2
+        fi
     else
         ((FAILED++))
         printf "%b %bFailed%b\n" "$EMOJI_FAIL" "$RED$BOLD" "$RESET" >&2
@@ -134,13 +204,10 @@ process_directory() {
     local dir="$1"
     local count=0
 
-    # Array of video extensions to look for
-    local extensions=("mkv" "mp4" "mov" "avi" "flv" "wmv" "webm" "m4v" "mpg" "mpeg" "3gp")
-
     # Use bash globbing (nullglob) to safely iterate files including those with spaces
     local ext
     shopt -s nullglob
-    for ext in "${extensions[@]}"; do
+    for ext in "${VIDEO_EXTENSIONS[@]}"; do
         for file in "$dir"/*."$ext"; do
             [[ -f "$file" ]] || continue
             ((TOTAL++))
@@ -157,17 +224,29 @@ process_directory() {
     fi
 }
 
-# Main logic
-if [[ -f "$target" ]]; then
-    # Target is a file
-    ((TOTAL++))
-    generate_thumbnail "$target"
-elif [[ -d "$target" ]]; then
-    # Target is a directory
-    process_directory "$target"
-else
-    echo "Error: '$target' is not a valid file or directory"
-    exit 1
-fi
+# Main logic: iterate over all provided targets
+for raw in "${TARGETS[@]}"; do
+    target=$(resolve_path "$raw")
+
+    if [[ -f "$target" ]]; then
+        # Target is a file
+        ((TOTAL++))
+        if is_video_file "$target"; then
+            generate_thumbnail "$target"
+        else
+            ((SKIPPED++))
+            if [[ $VERBOSE -eq 1 ]]; then
+                echo "Skipping non-video file: $target"
+            fi
+        fi
+    elif [[ -d "$target" ]]; then
+        # Target is a directory
+        process_directory "$target"
+    else
+        echo "Error: '$raw' is not a valid file or directory" >&2
+        ((FAILED++))
+        continue
+    fi
+done
 
 print_summary
