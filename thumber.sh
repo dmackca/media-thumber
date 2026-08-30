@@ -203,22 +203,23 @@ generate_thumbnail() {
 process_directory() {
     local dir="$1"
     local count=0
-
-    # Use bash globbing (nullglob) to safely iterate files including those with spaces
-    local ext
-    shopt -s nullglob
+    # Recursively find files matching the whitelist using a single find command (null-safe)
+    local find_expr=()
     for ext in "${VIDEO_EXTENSIONS[@]}"; do
-        for file in "$dir"/*."$ext"; do
-            [[ -f "$file" ]] || continue
-            ((TOTAL++))
-            generate_thumbnail "$file"
-            ((count++))
-        done
+        find_expr+=( -iname "*.$ext" -o )
     done
-    shopt -u nullglob
+    # remove trailing -o
+    unset 'find_expr[${#find_expr[@]}-1]'
+
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        ((TOTAL++))
+        generate_thumbnail "$file"
+        ((count++))
+    done < <(find "$dir" -type f \( "${find_expr[@]}" \) -print0 2>/dev/null)
 
     if [[ $VERBOSE -eq 1 ]]; then
-        echo "Processed $count files in $dir"
+        echo "Processed $count files in $dir (recursive)"
     elif [[ $count -eq 0 ]]; then
         echo "No video files found in: $dir"
     fi
@@ -234,10 +235,9 @@ for raw in "${TARGETS[@]}"; do
         if is_video_file "$target"; then
             generate_thumbnail "$target"
         else
+            # Explicit non-video file argument: report and count as skipped
             ((SKIPPED++))
-            if [[ $VERBOSE -eq 1 ]]; then
-                echo "Skipping non-video file: $target"
-            fi
+            echo "Skipping non-video file (explicit arg): $target"
         fi
     elif [[ -d "$target" ]]; then
         # Target is a directory
