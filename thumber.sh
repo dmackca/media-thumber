@@ -4,8 +4,15 @@
 # Takes a directory or file as argument and generates thumbnails for all video files
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 <directory|file>"
+    echo "Usage: $0 [--verbose] <directory|file>"
     exit 1
+fi
+
+# Parse flags
+VERBOSE=0
+if [[ "$1" == "--verbose" ]]; then
+    VERBOSE=1
+    shift
 fi
 
 target="$1"
@@ -59,6 +66,17 @@ fi
 
 EMOJI_OK="✅"
 EMOJI_FAIL="❌"
+
+# Counters
+CREATED=0
+SKIPPED=0
+FAILED=0
+TOTAL=0
+
+# Print summary
+print_summary() {
+    printf "\n%bProcessed %d files:%b generated %d, skipped %d, failed %d\n" "$BOLD" "$TOTAL" "$RESET" "$CREATED" "$SKIPPED" "$FAILED"
+}
 # Function to generate thumbnail for a single video file
 generate_thumbnail() {
     local video_file="$1"
@@ -67,7 +85,10 @@ generate_thumbnail() {
 
     # Check if thumbnail already exists
     if [[ -f "$thumbnail" ]]; then
-        echo "Thumbnail already exists: $thumbnail"
+        ((SKIPPED++))
+        if [[ $VERBOSE -eq 1 ]]; then
+            echo "Thumbnail already exists: $thumbnail"
+        fi
         return
     fi
 
@@ -80,6 +101,7 @@ generate_thumbnail() {
 
     # If duration cannot be read, skip this file
     if [[ -z "$duration" ]] || ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        ((SKIPPED++))
         printf " %bSkipped%b\n" "$YELLOW$BOLD" "$RESET"
         echo "Warning: Could not read duration for $video_file, skipping" >&2
         return
@@ -94,9 +116,11 @@ generate_thumbnail() {
     local errfile
     errfile=$(mktemp) || errfile="/tmp/thumber_err.$$"
     if ffmpeg -ss "$random_time" -i "$video_file" -vframes 1 "$thumbnail" > /dev/null 2> "$errfile"; then
+        ((CREATED++))
         printf "%b %bDone%b\n" "$EMOJI_OK" "$GREEN$BOLD" "$RESET"
         rm -f "$errfile"
     else
+        ((FAILED++))
         printf "%b %bFailed%b\n" "$EMOJI_FAIL" "$RED$BOLD" "$RESET" >&2
         echo "ffmpeg error for $video_file:" >&2
         cat "$errfile" >&2
@@ -119,22 +143,24 @@ process_directory() {
     for ext in "${extensions[@]}"; do
         for file in "$dir"/*."$ext"; do
             [[ -f "$file" ]] || continue
+            ((TOTAL++))
             generate_thumbnail "$file"
             ((count++))
         done
     done
     shopt -u nullglob
 
-    if [[ $count -eq 0 ]]; then
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo "Processed $count files in $dir"
+    elif [[ $count -eq 0 ]]; then
         echo "No video files found in: $dir"
-    else
-        echo "Processed $count video file(s)"
     fi
 }
 
 # Main logic
 if [[ -f "$target" ]]; then
     # Target is a file
+    ((TOTAL++))
     generate_thumbnail "$target"
 elif [[ -d "$target" ]]; then
     # Target is a directory
@@ -143,3 +169,5 @@ else
     echo "Error: '$target' is not a valid file or directory"
     exit 1
 fi
+
+print_summary
