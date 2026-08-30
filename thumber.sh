@@ -225,28 +225,53 @@ process_directory() {
     fi
 }
 
-# Main logic: iterate over all provided targets
+# Main logic: collect files first, then process them in a single loop
+FILES=()
+declare -A seen=()
+
 for raw in "${TARGETS[@]}"; do
     target=$(resolve_path "$raw")
 
     if [[ -f "$target" ]]; then
-        # Target is a file
+        # Explicit file target: count it and act accordingly
         ((TOTAL++))
         if is_video_file "$target"; then
-            generate_thumbnail "$target"
+            # deduplicate
+            if [[ -z "${seen[$target]}" ]]; then
+                seen[$target]=1
+                FILES+=("$target")
+            fi
         else
-            # Explicit non-video file argument: report and count as skipped
             ((SKIPPED++))
             echo "Skipping non-video file (explicit arg): $target"
         fi
     elif [[ -d "$target" ]]; then
-        # Target is a directory
-        process_directory "$target"
+        # Directory: gather matching video files silently
+        find_expr=()
+        for ext in "${VIDEO_EXTENSIONS[@]}"; do
+            find_expr+=( -iname "*.$ext" -o )
+        done
+        unset 'find_expr[${#find_expr[@]}-1]'
+
+        while IFS= read -r -d '' file; do
+            [[ -f "$file" ]] || continue
+            file=$(readlink -f -- "$file" 2>/dev/null || printf "%s" "$file")
+            if [[ -z "${seen[$file]}" ]]; then
+                seen[$file]=1
+                FILES+=("$file")
+                ((TOTAL++))
+            fi
+        done < <(find "$target" -type f \( "${find_expr[@]}" \) -print0 2>/dev/null)
     else
         echo "Error: '$raw' is not a valid file or directory" >&2
         ((FAILED++))
         continue
     fi
+done
+
+# Process collected files (videos only)
+for file in "${FILES[@]}"; do
+    generate_thumbnail "$file"
 done
 
 print_summary
